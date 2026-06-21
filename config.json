@@ -1,0 +1,105 @@
+{
+    "listen": {
+        "http": ":8081",
+        "socks5": ":1081"
+    },
+    "ca": {
+        "cert": "rootCA/rootCA.crt",
+        "key": "rootCA/rootCA.key"
+    },
+    "cache_dir": "cache",
+    "capture": {
+        "enabled": true,
+        "db_path": "capture/capture.sqlite",
+        "body_dir": "capture/bodies"
+    },
+    "gui": {
+        "enabled": true,
+        "listen": ":8090",
+        "dist_dir": "web/dist"
+    },
+    /* 出口代理（可选）
+       type: "none"(默认直连) | "socks5"(全局) | "pac"(按PAC分流)
+    */
+    "upstream": {
+        "type": "none"
+        //"type": "socks5",
+        //"socks5_addr": "192.168.3.3:1081"
+        // "type": "pac",
+        // "pac_file": "proxy.pac",          // 本地 PAC 文件（优先）
+        // "pac_url": "http://example.com/proxy.pac"  // 远程 PAC URL
+    },
+    "rules": [
+        {
+            "name": "Block ad networks",
+            "domains": [
+                "*.doubleclick.net",
+                "*.googlesyndication.com",
+                "ads.example.com"
+            ],
+            "action": "block"
+        },
+        {
+            "name": "Redirect internal service",
+            "domains": [
+                "internal.mycompany.com"
+            ],
+            "action": "redirect",
+            "target": {
+                "host": "192.168.1.100",
+                "port": 8080
+            }
+        },
+        {
+            "name": "Filter news site ads",
+            "domains": [
+                "*.example-news.com",
+                "news.example.org",
+                "*.baidu.com"
+            ],
+            "action": "filter",
+            "content": [
+                {
+                    "match": "百度一下",
+                    "replace": "百度两下"
+                }
+                /*                 {
+                    "match": "<div[^>]+class=\"[^\"]*ad[^\"]*\"[^>]*>.*?</div>",
+                    "replace": "",
+                    "regex": true
+                },
+                {
+                    "match": "(?i)(sponsored|advertisement)",
+                    "replace": "[removed]",
+                    "regex": true
+                } */
+            ]
+        },
+        {
+            "name": "claude翻译",
+            "domains": [
+                "*.claude.ai",
+                "claude.ai"
+            ],
+            "action": "filter",
+            "file": [
+                {
+                    "match": "/logo.png",
+                    "local": "filter/assets/new-logo.png"
+                },
+                {
+                    "match": "/i18n/*",
+                    "local": ""
+                }
+            ],
+            "content": []
+        },
+        {
+            "name": "Allow everything else",
+            "domains": [
+                "*"
+            ],
+            "action": "passthrough"
+        }
+    ]
+}

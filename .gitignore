@@ -1,0 +1,4 @@
+*.exe
+cache/
+**/node_modules/
+capture/

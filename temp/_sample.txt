@@ -1,0 +1,1 @@
+"++PgUiPsub": "Required for screen visibility. macOS may ask you to restart.",

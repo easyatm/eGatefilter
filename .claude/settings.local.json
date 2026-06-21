@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(openssl x509:*)",
+      "Bash(openssl rsa:*)",
+      "Bash(openssl ec:*)",
+      "Bash(go mod:*)",
+      "Bash(go build:*)",
+      "Bash(go vet:*)",
+      "Bash(go run:*)",
+      "Bash(kill %1)",
+      "Bash(go get:*)"
+    ]
+  }
+}
