@@ -172,10 +172,9 @@ onMounted(() => {
 <template>
   <main class="shell">
     <section class="hero">
-      <div>
-        <p class="eyebrow">eGatefilter Capture GUI</p>
-        <h1>TCP / HTTP / HTTPS 实时抓包</h1>
-        <p>元数据写入 SQLite，包文保存为本地文件，实时记录通过 WebSocket 推送。</p>
+      <div class="hero-left">
+        <h1>eGatefilter</h1>
+        <p>TCP / HTTP / HTTPS 抓包工具 · 数据已写入 SQLite，包文保存为本地文件</p>
       </div>
       <div class="status">{{ wsState }}</div>
     </section>
@@ -217,8 +216,10 @@ onMounted(() => {
       <section v-if="selected" class="detail">
         <div class="card">
           <h2>#{{ selected.id }} {{ selected.method || 'TCP' }} {{ selected.host }}</h2>
-          <p class="url">{{ selected.url || selected.path || selected.host }}</p>
-          <dl>
+          <div class="url-container">
+            <input type="text" readonly :value="selected.url || selected.path || selected.host" class="url-input" />
+          </div>
+          <dl class="info-grid">
             <div><dt>时间</dt><dd>{{ formatTime(selected.created_at) }}</dd></div>
             <div><dt>协议</dt><dd>{{ selected.protocol }}</dd></div>
             <div><dt>规则</dt><dd>{{ selected.rule_name || '-' }}</dd></div>
