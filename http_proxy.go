@@ -34,15 +34,27 @@ func removeHopHeaders(h http.Header) {
 // StartHTTP starts the HTTP proxy listener on addr.
 func (p *Proxy) StartHTTP(addr string) error {
 	server := &http.Server{
-		Addr:    addr,
-		Handler: http.HandlerFunc(p.handleHTTP),
+		Addr: addr,
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			p.handleHTTP(w, r, nil)
+		}),
 		// Disable HTTP/2 so we can handle everything at HTTP/1.1 level.
 		TLSNextProto: make(map[string]func(*http.Server, *tls.Conn, http.Handler)),
 	}
 	return server.ListenAndServe()
 }
 
-func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
+func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, guiHandler http.Handler) {
+	// 如果是本地 GUI 路由 (非代理请求)，则走 GUI mux
+	if guiHandler != nil && (strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/ws/") || !strings.Contains(r.Host, ".") || r.Host == "localhost" || strings.HasPrefix(r.Host, "127.0.0.1") || strings.HasPrefix(r.Host, "::1")) {
+		// 只有在路径是本地接口或者 host 是本地回路时才路由至 GUI
+		// 注意：如果客户端在浏览器直接访问代理的网页，它的 URL 也是相对路径的
+		if !r.URL.IsAbs() && r.Method != http.MethodConnect {
+			guiHandler.ServeHTTP(w, r)
+			return
+		}
+	}
+
 	if r.Method == http.MethodConnect {
 		p.handleCONNECT(w, r)
 		return
@@ -202,14 +214,20 @@ func (p *Proxy) doMITM(conn net.Conn, host string, rule *Rule) {
 	}
 	log.Printf("MITM: %s (rule: %s)", host, rule.Name)
 
-	serverTLS, err := p.tlsDialHost(host)
+	serverName := clientTLS.ConnectionState().ServerName
+	recordHost := host
+	if serverName != "" {
+		_, port := splitHostPortDefault(host, defaultPortForScheme("https"))
+		recordHost = net.JoinHostPort(serverName, fmt.Sprintf("%d", port))
+	}
+	serverTLS, err := p.tlsDialHostWithServerName(host, serverName)
 	if err != nil {
 		log.Printf("MITM: connect to real server %s: %v", host, err)
 		clientTLS.Close()
 		return
 	}
 
-	p.bridgeHTTP(clientTLS, serverTLS, host, rule, "https")
+	p.bridgeHTTP(clientTLS, serverTLS, recordHost, rule, "https")
 }
 
 // bridgeHTTP reads HTTP/1.x requests from client, forwards them to server,
@@ -227,6 +245,9 @@ func (p *Proxy) bridgeHTTP(client, server net.Conn, host string, rule *Rule, pro
 		req, err := http.ReadRequest(clientBR)
 		if err != nil {
 			return
+		}
+		if req.Host == "" {
+			req.Host = host
 		}
 		reqBody := readAndReplaceRequestBody(req)
 

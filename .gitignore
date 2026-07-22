@@ -1,6 +1,12 @@
 *.exe
+*.exe~
 cache/
 **/node_modules/
 capture/
 rootCA/
 filter/
+web/.env
+web/.env.local
+web/dist/**
+临时文件夹**/**
+temp/**

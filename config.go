@@ -3,18 +3,22 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
+	"strings"
 )
 
 // Config is the top-level configuration structure.
 type Config struct {
 	Listen struct {
+		Mixed  string `json:"mixed"` // 混合端口监听，自动区分 SOCKS5, HTTP 代理与 GUI
 		HTTP   string `json:"http"`
 		SOCKS5 string `json:"socks5"`
 	} `json:"listen"`
 	CA struct {
-		Cert string `json:"cert"`
-		Key  string `json:"key"`
+		Cert   string `json:"cert"`
+		Key    string `json:"key"`
+		CRLURL string `json:"crl_url"`
 	} `json:"ca"`
 	// CacheDir is the root directory for response caching.
 	// Set to "" to disable caching.
@@ -87,15 +91,17 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 	// Apply defaults
-	if cfg.Listen.HTTP == "" && cfg.Listen.SOCKS5 == "" {
-		cfg.Listen.HTTP = ":8080"
-		cfg.Listen.SOCKS5 = ":1080"
+	if cfg.Listen.HTTP == "" && cfg.Listen.SOCKS5 == "" && cfg.Listen.Mixed == "" {
+		cfg.Listen.Mixed = ":8081"
 	}
 	if cfg.CA.Cert == "" {
 		cfg.CA.Cert = "rootCA/rootCA.crt"
 	}
 	if cfg.CA.Key == "" {
 		cfg.CA.Key = "rootCA/rootCA.key"
+	}
+	if cfg.CA.CRLURL == "" {
+		cfg.CA.CRLURL = defaultCRLURL(cfg.Listen.Mixed, cfg.Listen.HTTP, cfg.GUI.Listen)
 	}
 	if cfg.CacheDir == "" {
 		cfg.CacheDir = "cache"
@@ -106,13 +112,44 @@ func LoadConfig(path string) (*Config, error) {
 	if cfg.Capture.BodyDir == "" {
 		cfg.Capture.BodyDir = "capture/bodies"
 	}
-	if cfg.GUI.Listen == "" {
+	// 如果设置了混合端口，则 GUI 默认不启动独立端口（可设为空）
+	if cfg.GUI.Listen == "" && cfg.Listen.Mixed == "" {
 		cfg.GUI.Listen = ":8090"
 	}
 	if cfg.GUI.DistDir == "" {
 		cfg.GUI.DistDir = "web/dist"
 	}
 	return &cfg, nil
+}
+
+func defaultCRLURL(addrs ...string) string {
+	for _, addr := range addrs {
+		addr = strings.TrimSpace(addr)
+		if addr == "" {
+			continue
+		}
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			if strings.HasPrefix(addr, ":") {
+				port = strings.TrimPrefix(addr, ":")
+			} else if idx := strings.LastIndex(addr, ":"); idx >= 0 {
+				host = addr[:idx]
+				port = addr[idx+1:]
+			}
+		}
+		if port == "" {
+			continue
+		}
+		host = strings.Trim(host, "[]")
+		if host == "" || host == "0.0.0.0" || host == "::" {
+			host = "127.0.0.1"
+		}
+		if strings.Contains(host, ":") {
+			host = "[" + host + "]"
+		}
+		return fmt.Sprintf("http://%s:%s/egatefilter.crl", host, port)
+	}
+	return "http://127.0.0.1:8081/egatefilter.crl"
 }
 
 // stripComments removes // line comments and /* block comments */ from JSON-like

@@ -1,11 +1,13 @@
 {
     "listen": {
-        "http": ":8081",
-        "socks5": ":1081"
+        "mixed": ":1080",
+        "http": "",
+        "socks5": ""
     },
     "ca": {
         "cert": "rootCA/rootCA.crt",
-        "key": "rootCA/rootCA.key"
+        "key": "rootCA/rootCA.key",
+        "crl_url": "http://127.0.0.1:1080/egatefilter.crl"
     },
     "cache_dir": "cache",
     "capture": {
@@ -15,7 +17,7 @@
     },
     "gui": {
         "enabled": true,
-        "listen": ":8090",
+        "listen": "",
         "dist_dir": "web/dist"
     },
     /* 出口代理（可选）
@@ -95,11 +97,12 @@
             "content": []
         },
         {
-            "name": "Allow everything else",
+            "name": "Decrypt all HTTPS & Capture all",
             "domains": [
                 "*"
             ],
-            "action": "passthrough"
+            "action": "filter",
+            "content": []
         }
     ]
 }

@@ -23,13 +23,16 @@ eGatefilter/
 ├── config.go        — Config / RuleConfig / ContentRule 结构体 + JSON 加载
 ├── rules.go         — RuleEngine：通配符域名匹配，返回第一条命中的 Rule
 ├── mitm.go          — CertManager：加载 CA、按需签发叶证书（内存缓存）
+├── mixed_listener.go — 混合协议监听器：基于首字节嗅探分流 SOCKS5 与 HTTP 连接
 ├── http_proxy.go    — HTTP 代理服务器（CONNECT 隧道 + 普通 HTTP + 缓存写入）
 ├── socks5.go        — SOCKS5 匿名代理服务器（RFC 1928，无认证）
-├── filter.go        — 响应体内容过滤（字符串/正则，透明处理 gzip）
+├── filter.go         — 响应体内容过滤（字符串/正则，透明处理 gzip）
 ├── file_replace.go  — filter 文件级替换（URL 路径通配符 → 本地文件/目录映射）
 ├── cache.go         — 响应体本地缓存（按 URL 目录结构写入 cache/ 文件夹）
 ├── capture.go       — 抓包核心：SQLite 元数据、包文文件保存、HTTP/TCP 记录封装
 ├── gui.go           — 内置 GUI/API/WebSocket 服务：查询抓包记录、读取包文、实时推送
+├── process_windows.go — Windows 平台支持：基于端口反查本机请求的进程 PID、名称和路径
+├── process_other.go   — 其他平台支持（空实现）
 ├── upstream.go      — 出口代理：直连 / SOCKS5 / HTTP CONNECT 拨号封装
 ├── pac.go           — PAC 文件/URL 加载与 FindProxyForURL JS 求值（otto 引擎）
 ├── config.json      — 运行时配置（规则在此维护）
@@ -56,8 +59,8 @@ go build -o gatefilter.exe .
 cd web && npm install && npm run build
 ```
 
-默认端口：HTTP 代理 `:8081`，SOCKS5 `:1081`（可在 config.json 修改）。
-GUI 默认端口：`:8090`，浏览器访问 `http://127.0.0.1:8090`。
+默认端口：混合监听端口 `:8081`（自动识别 HTTP 代理、SOCKS5 代理及浏览器直接访问 GUI，可在 config.json 修改）。
+GUI 访问地址：浏览器访问 `http://127.0.0.1:8081`。
 
 ---
 
@@ -67,12 +70,14 @@ GUI 默认端口：`:8090`，浏览器访问 `http://127.0.0.1:8090`。
 {
   // 支持 // 行注释 和 /* 块注释 */
   "listen": {
-    "http": ":8081",
-    "socks5": ":1081"
+    "mixed": ":8081",
+    "http": "",
+    "socks5": ""
   },
   "ca": {
     "cert": "rootCA/rootCA.crt",
-    "key":  "rootCA/rootCA.key"
+    "key":  "rootCA/rootCA.key",
+    "crl_url": "http://127.0.0.1:8081/egatefilter.crl"
   },
   "cache_dir": "cache",
   "capture": {
@@ -82,7 +87,7 @@ GUI 默认端口：`:8090`，浏览器访问 `http://127.0.0.1:8090`。
   },
   "gui": {
     "enabled": true,
-    "listen": ":8090",
+    "listen": "",
     "dist_dir": "web/dist"
   },
   "rules": [
@@ -109,14 +114,16 @@ GUI 默认端口：`:8090`，浏览器访问 `http://127.0.0.1:8090`。
 
 | 字段 | 说明 |
 | --- | --- |
-| `listen.http` | HTTP 代理监听地址，留空不启动 |
-| `listen.socks5` | SOCKS5 监听地址，留空不启动 |
+| `listen.mixed` | 混合监听地址，自动区分并处理 SOCKS5, HTTP/HTTPS 代理以及 GUI Web 服务 |
+| `listen.http` | HTTP 代理监听地址（可选，混合模式下可留空） |
+| `listen.socks5` | SOCKS5 监听地址（可选，混合模式下可留空） |
+| `ca.crl_url` | MITM 叶证书写入的 CRL 分发点，供 Windows Schannel 等客户端做吊销检查；为空时按监听端口自动生成 `/egatefilter.crl` |
 | `cache_dir` | 响应缓存根目录，默认 `"cache"`，留空禁用缓存 |
 | `capture.enabled` | 是否启用抓包记录 |
 | `capture.db_path` | SQLite 抓包元数据数据库路径 |
 | `capture.body_dir` | 包文文件保存目录，内部按域名/IP分文件夹，文件名前缀为年月日时分秒毫秒 |
 | `gui.enabled` | 是否启用内置 GUI/API/WebSocket 服务 |
-| `gui.listen` | GUI 服务监听地址，默认 `:8090` |
+| `gui.listen` | 独立 GUI 服务监听地址（可选，混合模式下可留空） |
 | `gui.dist_dir` | Vue Vite 构建产物目录，默认 `web/dist` |
 | `rules[].domains` | 域名列表，支持 `*.example.com`、精确匹配、`*`（全匹配） |
 | `rules[].action` | `block` \| `redirect` \| `filter` \| `passthrough` |
@@ -179,12 +186,16 @@ func (m *CaptureManager) Insert(record *CaptureRecord) int64
 func (m *CaptureManager) List(limit, offset int, keyword string) ([]CaptureRecord, error)
 func (m *CaptureManager) Get(id int64) (*CaptureRecord, error)
 func (m *CaptureManager) ReadBody(id int64, part string) (*CaptureBody, error)
+
+// Clear 清空 SQLite 抓包元数据，并删除 body_dir 下全部本地包文文件
+func (m *CaptureManager) Clear() error
 ```
 
 抓包策略：
 
 - HTTP：记录请求头、请求体、响应头、响应体。
 - HTTPS：复用现有 MITM 能力解密后记录 HTTP 明文包文。
+- SOCKS5 + HTTPS MITM：客户端目标常是 IP，抓包记录的域名优先使用 TLS SNI；请求头保存时会显式补写 `Host` 行，因为 Go 的 `http.Request.Host` 不在 `Header` map 中。
 - TCP：原始隧道按上行/下行双向流保存 `.bin` 包文文件，同时记录流量大小、目标、耗时等元数据。
 - 包文目录：`capture/bodies/{domain或ip}/{yyyyMMddHHmmss.SSS}_{part}.{ext}`；HTTP/HTTPS 响应按 URL 或 Content-Type 推断扩展名，请求/响应头为 `.txt`，TCP 为 `.bin`。
 - SQLite 仅保存索引、路径和摘要字段，具体包文不写入数据库。
@@ -193,6 +204,7 @@ func (m *CaptureManager) ReadBody(id int64, part string) (*CaptureBody, error)
 
 ```text
 GET /api/captures?limit=100&offset=0&q=keyword
+DELETE /api/captures
 GET /api/captures/{id}
 GET /api/captures/{id}/body/{requestHeader|requestBody|responseHeader|responseBody}
 WS  /ws/captures
@@ -202,14 +214,24 @@ WebSocket 消息格式：
 
 ```json
 { "type": "capture", "data": { "id": 1, "protocol": "https", "host": "example.com" } }
+{ "type": "clear" }
 ```
+
+前端“清空记录”按钮调用 `DELETE /api/captures`，会同步清空 SQLite 元数据与 `capture.body_dir` 下的包文文件；清空成功后通过 WebSocket 广播 `clear` 消息让所有已打开 GUI 页面刷新为空列表。
 
 ### web/ — Vue Vite 前端
 
 - `web/src/main.ts`：抓包列表、详情、包文预览、WebSocket 实时更新。
 - `web/src/style.css`：现代化深色 GUI 样式。
+- `web/.env.example`：前端后端地址默认值配置示例，可复制为 `web/.env` 后设置 `VITE_API_BASE`。
 - 开发：`cd web && npm run dev`
 - 构建：`cd web && npm run build`，后端默认服务 `web/dist`。
+- 前端 WebSocket 状态右侧提供“配置”按钮，默认隐藏后端地址配置栏；后端 HTTP 与 WS 使用同一组 IP:端口，输入 `127.0.0.1:8081` 或 `http://127.0.0.1:8081` 后点击“保存并重连”写入浏览器 `localStorage`（键名：`captureServerBase`），刷新页面后继续生效。
+- 前端后端地址默认值：优先读取 `localStorage.captureServerBase`；没有保存值时读取 `VITE_API_BASE`；仍为空时 API 使用当前页面同源地址，WebSocket 由同一地址自动推导。
+- 前端抓包搜索框为本地实时过滤：输入时立即按协议、方法、域名、URL、路径、状态码、规则、动作、客户端/目标地址、进程名/路径和备注过滤当前已加载列表；“刷新”按钮仅重新拉取最新记录，不再携带搜索关键字。
+- 前端过滤关键字在前端本地持久化（键名：`captureKeyword`），刷新页面后自动还原。
+- 请求/响应头、体包文查看采用 Monaco Editor 渲染，支持根据内容自动切换高亮语法，支持中英双语与双仓库地址动态加载；已关闭自动换行和字符拼写/Unicode安全检查；若内容是 JSON 则自动进行格式化排版。- 抓包记录基本元数据卡片移入右侧面板首位的“信息” Tab，以中文 Key-Value 纯文本格式统一使用 Monaco Editor 编辑器显示，提供了便捷的数据查看与文本复制能力。- 大模型协议（Gemini 与 OpenAI）智能解析展示：当请求体或响应体（如 LLM SSE 流协议）符合大模型协议时，提供“交互视图”与“原始代码”双视图切换。交互视图自动还原拼接文本、系统提��词、对话气泡气泡流、大模型调用工具函数（Function Calls）、可用工具列表（Tools Declared）以及 Token 统计指标；支持大模型单体工具执行协议（`functionCall`、`functionResponse`）的独立捕获与交互式高亮排版展示；支持在对话历史（contents/messages）气泡中自动解析并渲染内嵌的工具调用与返回结果卡片；对话文本部分支持完整的 Markdown 富文本渲染展示。
+- 交互视图组件化：支持在 `web/src/components/` 编写独立的协议交互渲染组件（如 `GeminiView.vue`、`OpenaiView.vue`），并在 `App.vue` 中由 `detectedFormat` 统一检测与路由分发，利于未来扩展其他类型的流式协议。
 
 ### pac.go — PAC 求值器
 
@@ -237,7 +259,7 @@ func LoadConfig(path string) (*Config, error)
 func stripComments(src []byte) []byte
 
 type Config struct {
-    Listen   struct{ HTTP, SOCKS5 string }
+    Listen   struct{ Mixed, HTTP, SOCKS5 string }
     CA       struct{ Cert, Key string }
     CacheDir string        // 响应缓存目录，默认 "cache"，空字符串禁用
     Rules    []RuleConfig
@@ -263,11 +285,17 @@ func matchWildcard(pattern, domain string) bool
 // 加载 CA，支持 PKCS1 RSA / EC / PKCS8 格式私钥
 func LoadCA(certFile, keyFile string) (*CertManager, error)
 
-// 返回域名对应的叶证书（首次生成 RSA 2048，之后从内存缓存取）
+// 加载 CA 并设置写入叶证书的 CRL 分发点
+func LoadCAWithCRLURL(certFile, keyFile, crlURL string) (*CertManager, error)
+
+// 返回域名/IP 对应的叶证书（首次生成 RSA 2048，之后从内存缓存取；IP 会写入 IP SAN，域名会写入 DNS SAN）
 func (cm *CertManager) GetCert(host string) (*tls.Certificate, error)
 
-// 构造用于 tls.Server() 的配置（含 NextProtos: http/1.1，禁用 HTTP/2）
+// 构造用于 tls.Server() 的配置（含 NextProtos: http/1.1，禁用 HTTP/2；优先按客户端 TLS SNI 动态签发证书）
 func (cm *CertManager) TLSServerConfig(host string) (*tls.Config, error)
+
+// 生成 CA 签名的空 CRL，供 /egatefilter.crl 返回，解决 Schannel 吊销检查失败
+func (cm *CertManager) EmptyCRL() ([]byte, error)
 ```
 
 ### http_proxy.go — HTTP 代理

@@ -1,11 +1,15 @@
 package main
 
 import (
+	"crypto/tls"
 	"flag"
 	"log"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 )
 
 // Proxy holds the shared state for all proxy servers.
@@ -26,7 +30,7 @@ func main() {
 		log.Fatalf("config: %v", err)
 	}
 
-	ca, err := LoadCA(cfg.CA.Cert, cfg.CA.Key)
+	ca, err := LoadCAWithCRLURL(cfg.CA.Cert, cfg.CA.Key, cfg.CA.CRLURL)
 	if err != nil {
 		log.Fatalf("CA: %v", err)
 	}
@@ -66,12 +70,64 @@ func main() {
 	}
 
 	started := 0
+	hub := NewCaptureHub()
+	if capture != nil {
+		capture.SetHub(hub)
+	}
+	guiHandler := corsMiddleware(p.GUIMux(hub))
+
+	// 如果配置了 mixed 监听，启动混合协议侦听
+	if cfg.Listen.Mixed != "" {
+		started++
+		go func() {
+			log.Printf("Mixed listener (SOCKS5 + HTTP/HTTPS Proxy + GUI) on %s", cfg.Listen.Mixed)
+			rawListener, err := net.Listen("tcp", cfg.Listen.Mixed)
+			if err != nil {
+				log.Fatalf("mixed listener bind: %v", err)
+			}
+			ml := newMixedListener(rawListener)
+			defer ml.Close()
+
+			// 启动虚拟 SOCKS5 代理
+			go func() {
+				socksListener := ml.SOCKSListener()
+				log.Printf("Mixed SOCKS5 server running...")
+				for {
+					conn, err := socksListener.Accept()
+					if err != nil {
+						return
+					}
+					go p.handleSOCKS5(conn)
+				}
+			}()
+
+			// 启动虚拟 HTTP/GUI 服务
+			httpListener := ml.HTTPListener()
+			log.Printf("Mixed HTTP/GUI server running...")
+			server := &http.Server{
+				Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					p.handleHTTP(w, r, guiHandler)
+				}),
+				TLSNextProto: make(map[string]func(*http.Server, *tls.Conn, http.Handler)),
+			}
+			if err := server.Serve(httpListener); err != nil {
+				log.Printf("mixed http server: %v", err)
+			}
+		}()
+	}
 
 	if cfg.Listen.HTTP != "" {
 		started++
 		go func() {
 			log.Printf("HTTP proxy on %s", cfg.Listen.HTTP)
-			if err := p.StartHTTP(cfg.Listen.HTTP); err != nil {
+			server := &http.Server{
+				Addr: cfg.Listen.HTTP,
+				Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					p.handleHTTP(w, r, guiHandler)
+				}),
+				TLSNextProto: make(map[string]func(*http.Server, *tls.Conn, http.Handler)),
+			}
+			if err := server.ListenAndServe(); err != nil {
 				log.Fatalf("HTTP proxy: %v", err)
 			}
 		}()
@@ -87,18 +143,23 @@ func main() {
 		}()
 	}
 
-	if cfg.GUI.Enabled {
+	if cfg.GUI.Enabled && cfg.GUI.Listen != "" {
 		started++
 		go func() {
-			log.Printf("GUI on %s", cfg.GUI.Listen)
-			if err := p.StartGUI(cfg.GUI.Listen); err != nil {
+			log.Printf("Standalone GUI on %s", cfg.GUI.Listen)
+			server := &http.Server{
+				Addr:              cfg.GUI.Listen,
+				Handler:           guiHandler,
+				ReadHeaderTimeout: 10 * time.Second,
+			}
+			if err := server.ListenAndServe(); err != nil {
 				log.Fatalf("GUI: %v", err)
 			}
 		}()
 	}
 
 	if started == 0 {
-		log.Fatal("no listeners configured — set listen.http and/or listen.socks5 in config.json")
+		log.Fatal("no listeners configured — set listen.mixed, listen.http or listen.socks5 in config.json")
 	}
 
 	sig := make(chan os.Signal, 1)

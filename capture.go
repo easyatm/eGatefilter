@@ -258,6 +258,31 @@ FROM captures`
 	return records, rows.Err()
 }
 
+func (m *CaptureManager) Clear() error {
+	if m == nil {
+		return errors.New("抓包功能未启用")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, err := m.db.Exec(`DELETE FROM captures; DELETE FROM sqlite_sequence WHERE name = 'captures';`); err != nil {
+		return fmt.Errorf("清空抓包数据库失败: %w", err)
+	}
+	entries, err := os.ReadDir(m.bodyDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("读取抓包包文目录失败: %w", err)
+	}
+	for _, entry := range entries {
+		path := filepath.Join(m.bodyDir, entry.Name())
+		if err := os.RemoveAll(path); err != nil {
+			return fmt.Errorf("删除抓包包文失败 %s: %w", path, err)
+		}
+	}
+	return nil
+}
+
 func (m *CaptureManager) Get(id int64) (*CaptureRecord, error) {
 	if m == nil {
 		return nil, errors.New("抓包功能未启用")
@@ -684,6 +709,9 @@ func dumpRequestHeader(req *http.Request) []byte {
 		uri = req.URL.String()
 	}
 	fmt.Fprintf(&b, "%s %s %s\r\n", req.Method, uri, req.Proto)
+	if req.Host != "" {
+		fmt.Fprintf(&b, "Host: %s\r\n", req.Host)
+	}
 	_ = req.Header.Write(&b)
 	b.WriteString("\r\n")
 	return []byte(b.String())

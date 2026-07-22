@@ -59,28 +59,66 @@ func (h *CaptureHub) Broadcast(record *CaptureRecord) {
 	}
 }
 
+func (h *CaptureHub) BroadcastClear() {
+	if h == nil {
+		return
+	}
+	payload, err := json.Marshal(map[string]any{"type": "clear"})
+	if err != nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for conn := range h.clients {
+		if err := conn.WriteMessage(websocket.TextMessage, payload); err != nil {
+			_ = conn.Close()
+			delete(h.clients, conn)
+		}
+	}
+}
+
 func (p *Proxy) StartGUI(addr string) error {
 	hub := NewCaptureHub()
 	if p.capture != nil {
 		p.capture.SetHub(hub)
 	}
-	mux := http.NewServeMux()
-	mux.HandleFunc("/api/captures", p.handleCaptureList)
-	mux.HandleFunc("/api/captures/", p.handleCaptureDetail)
-	mux.HandleFunc("/ws/captures", p.handleCaptureWS(hub))
-	mux.HandleFunc("/", p.handleGUIStatic())
 	server := &http.Server{
 		Addr:              addr,
-		Handler:           corsMiddleware(mux),
+		Handler:           corsMiddleware(p.GUIMux(hub)),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	return server.ListenAndServe()
 }
 
+func (p *Proxy) GUIMux(hub *CaptureHub) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/egatefilter.crl", p.handleCRL)
+	mux.HandleFunc("/api/captures", p.handleCaptureList)
+	mux.HandleFunc("/api/captures/", p.handleCaptureDetail)
+	mux.HandleFunc("/ws/captures", p.handleCaptureWS(hub))
+	mux.HandleFunc("/", p.handleGUIStatic())
+	return mux
+}
+
+func (p *Proxy) handleCRL(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSONError(w, http.StatusMethodNotAllowed, "方法不允许")
+		return
+	}
+	crl, err := p.ca.EmptyCRL()
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/pkix-crl")
+	w.Header().Set("Cache-Control", "public, max-age=3600")
+	_, _ = w.Write(crl)
+}
+
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Accept")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
@@ -91,6 +129,17 @@ func corsMiddleware(next http.Handler) http.Handler {
 }
 
 func (p *Proxy) handleCaptureList(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodDelete {
+		if err := p.capture.Clear(); err != nil {
+			writeJSONError(w, http.StatusServiceUnavailable, err.Error())
+			return
+		}
+		if p.capture != nil && p.capture.hub != nil {
+			p.capture.hub.BroadcastClear()
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		return
+	}
 	if r.Method != http.MethodGet {
 		writeJSONError(w, http.StatusMethodNotAllowed, "方法不允许")
 		return
